@@ -1,3 +1,7 @@
+# Do not track any data
+data/
+.snakemake/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
