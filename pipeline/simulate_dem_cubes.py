@@ -33,7 +33,7 @@ dem_moxsi = InstrumentDEMOXSI(observing_interval,
                               pad_fov=pad_fov)
 
 # Connect to Dask client
-client = distributed.Client(address=snakemake.config['client_address'])
+# client = distributed.Client(address=snakemake.config['client_address'])
 
 # Build DEM maps
 dem_output_dir = pathlib.Path(snakemake.output[0])
