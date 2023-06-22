@@ -6,11 +6,13 @@ author:
 - "Albert Shih"
 - "Jake Parker"
 - "Amir Caspi"
+- "P.S. Athiray"
 institute:
 - "AU/NASA GSFC"
 - "NASA GSFC"
 - "NASA GSFC"
 - "SWRI"
+- "UAH/NASA MSFC"
 format:
   revealjs:
     logo: "static/CubIXSS_badge.png"
@@ -728,26 +730,14 @@ plt.show()
 
 ```{python}
 fig = plt.figure(figsize=(14, 5.5))
-
-# HF
-hf_stacked = stack_components(overlappograms_hf)
-hf_summed = hf_stacked[0].rebin((hf_stacked[0].data.shape[0], 1),operation=np.sum)[0]
 ax = fig.add_subplot(projection=hf_summed)
 hf_summed.plot(axes=ax, ls='-', data_unit='ph', label='High frequency', color=frequency_palette[0])
-# LF
-lf_stacked = stack_components(overlappograms_lf)
-lf_summed = lf_stacked[0].rebin((lf_stacked[0].data.shape[0], 1),operation=np.sum)[0]
 lf_summed.plot(axes=ax, ls='-', data_unit='ph', label='Low frequency', color=frequency_palette[1])
-
-ar_center = SkyCoord(Tx=50*u.arcsec,
-                     Ty=-505*u.arcsec,
-                     frame=wcs_to_celestial_frame(overlappograms_hf[0].wcs))
 
 si_mg_lines = selected_lines[[r in ['Si', 'Mg'] for r in selected_lines['element']]]
 for ol, color in zip(overlappograms_hf[1:], spectral_palette[1:]):
     line_pos, _, _ = ol.wcs.world_to_pixel(ar_center, si_mg_lines['wavelength'])
     for pos, row in zip(line_pos, si_mg_lines):
-        text_ypos = 950
         ax.annotate(
             f'{row["ion name"]}, {row["wavelength"].to_string(format="latex_inline", precision=5)}',
             (pos, 0),
@@ -773,26 +763,14 @@ plt.show()
 
 ```{python}
 fig = plt.figure(figsize=(14, 5.5))
-
-# HF
-hf_stacked = stack_components(overlappograms_hf)
-hf_summed = hf_stacked[0].rebin((hf_stacked[0].data.shape[0], 1),operation=np.sum)[0]
 ax = fig.add_subplot(projection=hf_summed)
 hf_summed.plot(axes=ax, ls='-', data_unit='ph', label='High frequency', color=frequency_palette[0])
-# LF
-lf_stacked = stack_components(overlappograms_lf)
-lf_summed = lf_stacked[0].rebin((lf_stacked[0].data.shape[0], 1),operation=np.sum)[0]
 lf_summed.plot(axes=ax, ls='-', data_unit='ph', label='Low frequency', color=frequency_palette[1])
-
-ar_center = SkyCoord(Tx=50*u.arcsec,
-                     Ty=-505*u.arcsec,
-                     frame=wcs_to_celestial_frame(overlappograms_hf[0].wcs))
 
 O_lines = selected_lines[[r in ['O'] for r in selected_lines['element']]]
 for ol, color in zip(overlappograms_hf[1:], spectral_palette[1:]):
     line_pos, _, _ = ol.wcs.world_to_pixel(ar_center, O_lines['wavelength'])
     for pos, row in zip(line_pos, O_lines):
-        text_ypos = 950
         ax.annotate(
             f'{row["ion name"]}, {row["wavelength"].to_string(format="latex_inline", precision=5)}',
             (pos, 0),
@@ -815,6 +793,13 @@ plt.show()
 ```
 
 ## Summary
+
+- SXR holds key diagnostics for finding the 🚬🔫
+- MOXSI will observe many ARs 1--60 Å range
+- Low-frequency AR heating produces excess hot emission (Fe XVII, XVIII, XIX, XXI, Si XIV)
+- Extracting these signatures from MOXSI data is **challenging, but feasible!**
+- **Future:** Inversions! [e.g. @winebarger_unfolding_2019]
+- **Future:** Strategies for improving instrument throughput
 
 ## References
 
