@@ -28,6 +28,5 @@ jobs:
         with:
           target: gh-pages
           path: presentation
-          render: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
