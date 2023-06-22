@@ -1,0 +1,62 @@
+import pathlib
+
+import paths
+
+
+FREQUENCIES = [0.3, 0.01]
+DATA_DIR = paths.pipeline_data
+
+configfile: "config.yaml"
+
+
+rule download_magnetogram:
+    output:
+        DATA_DIR / 'magnetogram.fits',
+    script:
+        "download_magnetogram.py"
+
+rule download_aia:
+    output:
+        DATA_DIR / 'aia_171.fits'
+    script:
+        "download_aia.py"
+
+rule build_skeleton:
+    input:
+        DATA_DIR / 'magnetogram.fits',
+        DATA_DIR / 'aia_171.fits'
+    output:
+        DATA_DIR / 'skeleton.asdf'
+    script:
+        "build_skeleton.py"
+
+rule run_hydrodynamics:
+    input:
+        DATA_DIR / 'skeleton.asdf'
+    output:
+        directory(DATA_DIR / 'p{frequency}' / 'model_results.zarr'),
+        DATA_DIR / 'p{frequency}' / 'skeleton.asdf'
+    params:
+        frequency=lambda wildcards: float(wildcards.frequency)
+    script:
+        "run_hydrodynamics.py"
+
+rule simulate_dem_cubes:
+    input:
+        DATA_DIR / 'p{frequency}' / 'skeleton.asdf'
+    output:
+        directory(DATA_DIR / 'p{frequency}' / 'dem'),
+        directory(DATA_DIR / 'p{frequency}' / 'spectra')
+    script:
+        "simulate_dem_cubes.py"
+
+rule sample_spectral_cube_to_overlappogram:
+    input:
+        DATA_DIR / 'p{frequency}' / 'spectra'
+    output:
+        DATA_DIR / 'p{frequency}' / 'overlappograms' / 'overlappogram_o{order}.fits'
+    params:
+        spectral_order=lambda wildcards: int(wildcards.order)
+    script:
+        "project_spectral_cubes.py"
+        

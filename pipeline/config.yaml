@@ -1,0 +1,12 @@
+client_address: ''
+ar_date: '2020-11-09T17:59:57.340'
+jsoc_email: 'will.t.barnes@gmail.com'
+ebtel_directory: '/Users/wtbarnes/Documents/codes/ebtelPlusPlus/'
+simulation_time: 3.0e4 # in s
+log_t_min: 5.5 # in K
+log_t_max: 7.5 # in K
+delta_log_t: 0.1
+observation_duration: 3600.0 # in s
+pad_fov_x: 70.0 # in arcsec
+pad_fov_y: 70.0 # in arcsec
+spectral_table: 'sun_coronal_1992_feldman_ext_all'
