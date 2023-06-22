@@ -45,6 +45,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import sunpy.map
 import wesanderson
 
+import fiasco
 import mocksipipeline
 from mocksipipeline.detector.response import Channel, SpectrogramChannel
 from mocksipipeline.physics.spectral import SpectralModel
@@ -243,7 +244,7 @@ Also NuSTAR, e.g. @marsh_hard_2018, talk by J. Duncan on Tuesday
 ```{python}
 spectral_table = SpectralModel().spectral_table
 
-fig = plt.figure(figsize=(15, 7))
+fig = plt.figure(figsize=(14, 7))
 vmin, vmax = AsymmetricPercentileInterval(1,99).get_limits(spectral_table.data)
 ax = spectral_table.plot(aspect=20,
                          norm=ImageNormalize(vmin=vmin, vmax=vmax, stretch=LogStretch()),
@@ -255,6 +256,52 @@ ax.coords[0].set_axislabel('Wavelength [Å]')
 ax.coords[1].set_axislabel('Temperature [MK]')
 ax.set_xlim(spectral_table.wcs.world_to_pixel([1,60]*u.AA, 1*u.MK)[0])
 ax.set_ylim(spectral_table.wcs.world_to_pixel(1*u.AA, [1,30]*u.MK)[1])
+plt.show()
+```
+
+---
+
+```{python}
+temperature = 10**np.arange(6,7.5,0.05)*u.K
+density = 1e15*u.Unit('K cm-3') / temperature
+ions = {iname: fiasco.Ion(iname, temperature) for iname in np.unique(selected_lines['ion name'])}
+goft = {k: v.contribution_function(density, couple_density_to_temperature=True) for k,v in ions.items()}
+
+element_colors = {name: color for name, color in zip(np.unique(selected_lines['element']), wesanderson.color_palettes['Fantastic Mr. Fox'][0][1:])}
+
+fig = plt.figure(figsize=(14, 8))
+ax = fig.add_subplot(111)
+for row in selected_lines:
+    waves = ions[row['ion name']].transitions.wavelength[~ions[row['ion name']].transitions.is_twophoton]
+    iwave = int(np.argmin(np.fabs(waves-row['wavelength'])))
+    _goft = goft[row['ion name']][...,iwave].squeeze()
+    ax.plot(temperature, _goft, color=element_colors[row['element']], label=row['element'])
+    ax.text(temperature[_goft.argmax()].value, _goft.max().value, row['ion name'],
+            horizontalalignment='center', verticalalignment='bottom', clip_on=True)
+ax.set_xscale('log')
+ax.set_yscale('log')
+ax.set_ylim(1e-26, 1e-23)
+ax.set_xlim(temperature[[0,-1]].value)
+ax.set_xlabel('$T$ [K]')
+ax.set_ylabel(f'$G(T)$ [{_goft.unit.to_string(format="latex_inline")}]')
+handles, labels = ax.get_legend_handles_labels()
+by_label = dict(zip(labels, handles))
+ax.legend(by_label.values(), by_label.keys(), frameon=False)
+
+# Add model DEM distributions
+ax2 = ax.twinx()
+bins_T, H = calculate_em(
+    res_single['time'], res_single['electron_temperature'], res_single['density'], L)
+plot_histogram(H.value, bins_T.value, ax2, color=frequency_palette[1], alpha=0.7, label='impulsive')
+bins_T, H = calculate_em(
+    res_multi['time'], res_multi['electron_temperature'], res_multi['density'], L)
+plot_histogram(H.value, bins_T.value, ax2, color=frequency_palette[0], alpha=0.7, label='steady-ish')
+ax2.set_xscale('log')
+ax2.set_yscale('log')
+ax2.set_ylim(5e25, 3e28)
+ax2.set_ylabel(r'EM [cm$^{-5}$]')
+ax2.legend(frameon=False, loc=2)
+
 plt.show()
 ```
 
@@ -287,6 +334,7 @@ CubIXSS ~~6U~~ 16U cubesat launching 2025
 :::: {.columns}
 ::: {.column width="60%"}
 - Full-disk slitless spectrograph ("overlappograph")
+- Four XRT-like filtergram images 
 - Spectral coverage from 1--60 Å (12--0.2 keV)
 - Spatial plate scale: 7.4 arcsec pixel$^{-1}$
 - Spectral plate scale: 72 mÅ pixel$^{-1}$
@@ -298,6 +346,34 @@ CubIXSS ~~6U~~ 16U cubesat launching 2025
 ![](static/CubIXSS_badge.png)
 :::
 ::::
+
+## MOXSI Bandpasses
+
+```{python}
+filtergram_channels = [Channel(f'filtergram_{i}') for i in range(1,5)]
+dispersed_channels = [SpectrogramChannel(o) for o in range(0,5)]
+
+fig = plt.figure(figsize=(12,6))
+ax = fig.add_subplot()
+for chan,color in zip(dispersed_channels, spectral_palette):
+    ax.plot(chan.wavelength, chan.effective_area, color=color, label=f'order={chan.spectral_order}')
+for chan,color in zip(filtergram_channels, filtergram_palette):
+    ax.plot(chan.wavelength, chan.effective_area, color=color,
+            label='Al-poly' if 'Al' in chan.filter_label else chan.filter_label)
+
+ax.set_yscale('log')
+ax.set_xlim(1,70)
+ax.set_ylim(1e-11,1e-4)
+ax.set_xlabel('Wavelength [Å]')
+ax.set_ylabel('Effective Area [cm$^2$]')
+wave_to_energy = lambda x: u.Quantity(x, 'AA').to_value('keV', equivalencies=u.equivalencies.spectral())
+energy_to_wave = lambda x: u.Quantity(x, 'keV').to_value('AA', equivalencies=u.equivalencies.spectral())
+secax = ax.secondary_xaxis('top', functions=(wave_to_energy, energy_to_wave))
+secax.set_xlabel('Energy [keV]')
+secax.set_xticks([12, 2, 1, 0.5, 0.3, 0.2])
+ax.legend(frameon=False,ncol=2)
+plt.show()
+```
 
 ## MOXSI Data
 
@@ -359,6 +435,12 @@ for line in selected_lines[line_indices]:
                 fontsize=12)
 plt.show()
 ```
+
+::: {.aside}
+- N pole oriented along dispersion axis to reduce AR overlap
+- Zeroth order in middle of detector
+- Lines observed in both positive and negative orders
+:::
 
 ---
 
@@ -437,34 +519,6 @@ ax.set_yscale('symlog')
 ax.set_ylim(0,2e3)
 ax.set_xlim(0,ol[sl].data.shape[1])
 ax.legend(frameon=False)
-plt.show()
-```
-
-## MOXSI Bandpasses
-
-```{python}
-filtergram_channels = [Channel(f'filtergram_{i}') for i in range(1,5)]
-dispersed_channels = [SpectrogramChannel(o) for o in range(0,5)]
-
-fig = plt.figure(figsize=(12,6))
-ax = fig.add_subplot()
-for chan,color in zip(dispersed_channels, spectral_palette):
-    ax.plot(chan.wavelength, chan.effective_area, color=color, label=f'order={chan.spectral_order}')
-for chan,color in zip(filtergram_channels, filtergram_palette):
-    ax.plot(chan.wavelength, chan.effective_area, color=color,
-            label='Al-poly' if 'Al' in chan.filter_label else chan.filter_label)
-
-ax.set_yscale('log')
-ax.set_xlim(1,70)
-ax.set_ylim(1e-11,1e-4)
-ax.set_xlabel('Wavelength [Å]')
-ax.set_ylabel('Effective Area [cm$^2$]')
-wave_to_energy = lambda x: u.Quantity(x, 'AA').to_value('keV', equivalencies=u.equivalencies.spectral())
-energy_to_wave = lambda x: u.Quantity(x, 'keV').to_value('AA', equivalencies=u.equivalencies.spectral())
-secax = ax.secondary_xaxis('top', functions=(wave_to_energy, energy_to_wave))
-secax.set_xlabel('Energy [keV]')
-secax.set_xticks([12, 2, 1, 0.5, 0.3, 0.2])
-ax.legend(frameon=False,ncol=2)
 plt.show()
 ```
 
