@@ -1,0 +1,822 @@
+---
+title: "Constraining Very Hot Active Region Plasma with MOXSI"
+subtitle: "SPHERE Workshop / College Park, MD / 22 June 2023"
+author:
+- "Will Barnes"
+- "Albert Shih"
+- "Jake Parker"
+- "Amir Caspi"
+institute:
+- "AU/NASA GSFC"
+- "NASA GSFC"
+- "NASA GSFC"
+- "SWRI"
+format:
+  revealjs:
+    logo: "static/CubIXSS_badge.png"
+    theme: simple
+    css: custom.css
+bibliography: references.bib
+csl: apj.csl
+footer: "[wtbarnes.github.io/sphere-workshop-2023-talk](https://wtbarnes.github.io/sphere-workshop-2023-talk)"
+title-slide-attributes: 
+  data-background-image: "static/sunpy_logo_portrait_powered.png"
+  data-background-size: 7%
+  data-background-position: 2% 2%
+---
+
+```{python}
+import os
+import pathlib
+
+from astropy.coordinates import SkyCoord
+import astropy.table
+import astropy.units as u
+from astropy.visualization import ImageNormalize, AsymmetricPercentileInterval, LogStretch, AsinhStretch
+from astropy.wcs.utils import wcs_to_celestial_frame
+import numpy as np
+import matplotlib
+import matplotlib.ticker
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import sunpy.map
+import wesanderson
+
+import mocksipipeline
+from mocksipipeline.detector.response import Channel, SpectrogramChannel
+from mocksipipeline.physics.spectral import SpectralModel
+from mocksipipeline.util import stack_components, read_data_cube
+from overlappy.io import read_overlappogram
+from overlappy.util import color_lat_lon_axes
+from pydrad.visualize import plot_histogram
+import synthesizAR
+from synthesizAR.interfaces.ebtel import read_xml, run_ebtel
+from synthesizAR.instruments.physical import InstrumentDEM
+
+frequency_palette = wesanderson.color_palettes['The French Dispatch'][0][2:]
+spectral_palette = wesanderson.color_palettes['Darjeeling Limited'][0]
+filtergram_palette = wesanderson.color_palettes['Moonrise Kingdom'][2]
+
+EBTEL_DIR = '/Users/wtbarnes/Documents/codes/ebtelPlusPlus/'
+data_dir = pathlib.Path('../data/')
+observed_data_dir = data_dir / 'observations' / 'ar_2020-11-09T18:00:00.000'
+simulation_data_dir = pathlib.Path('../pipeline/data')
+
+line_list = astropy.table.QTable.read(data_dir / 'moxsi-line-list.asdf')
+selected_wavelengths = [
+    6.1803998947143555, # Si XIV
+    6.647900104522705, # Si XIII
+    14.668999671936035, # Fe XIX
+    15.012999534606934, # Fe XVII
+    17.051000595092773, # Fe XVII
+    17.09600067138672, # Fe XVII
+    16.77560043334961, # Fe XVII
+    16.07200050354004, # Fe XVII
+    15.26200008392334, # Fe XVII
+    12.82699966430664, # Fe XX
+    18.967100143432617, # O VIII
+    21.601499557495117, # O VII
+    22.097700119018555, # O VII
+    21.803600311279297, # O VII
+    14.208800315856934, # Fe XVIII
+    9.314299583435059, # Mg XI
+    44.160301208496094, # Si XII
+    13.524900436401367, # Fe XIX
+    12.281999588012695, # Fe XXI
+] * u.AA
+selected_lines = astropy.table.QTable(astropy.table.vstack(
+    [line_list[np.argmin(np.fabs(line_list['wavelength'] - w))] for w in selected_wavelengths]
+))
+
+def multi_event_simulation(config, N, Heq, duration):
+    tn = (config['total_time'] - N*duration)/N
+    events = []
+    for i in range(N):
+        events.append({'event':{
+            'rise_start': i*(tn + duration),
+            'rise_end': i*(tn + duration) + duration/2,
+            'decay_start': i*(tn + duration) + duration/2,
+            'decay_end': i*(tn + duration) + duration,
+            'magnitude': 2*config['total_time']*Heq/N/duration,}})
+
+    config['heating']['events'] = events
+    res = run_ebtel(config, EBTEL_DIR)
+    res['time'] = u.Quantity(res['time'], 's')
+    res['electron_temperature'] = u.Quantity(res['electron_temperature'], 'K')
+    res['density'] = u.Quantity(res['density'], 'cm-3')
+    return res
+
+
+def calculate_em(t, T, n, L,):
+    bins_T = 10**(np.arange(5.5, 7.5, 0.1))*u.K
+    bins_t = np.concatenate((t[:1], (t[1:] + t[:-1])/2., t[-1:])).value*t.unit
+    # Make 2D histogram
+    H, _, _ = np.histogram2d(
+        T.to_value('K'), t.value,
+        bins=(bins_T.to_value('K'), bins_t.value),
+        weights=np.diff(bins_t)/np.diff(bins_t).sum()*L.to_value('cm')*n.to_value('cm-3')**2
+    )
+    return bins_T, H.sum(axis=1)*u.cm**(-5)
+
+
+def add_arrow_from_coords(ax, tail, head, **arrow_kwargs):
+    if tail.unit == u.pix:
+        transform = 'pixel'
+        end_unit = 'pixel'
+    else:
+        transform = 'world'
+        end_unit = 'deg'
+    arrow = matplotlib.patches.FancyArrowPatch(tail.to_value(end_unit),
+                                               head.to_value(end_unit),
+                                               transform=ax.get_transform(transform),
+                                               **arrow_kwargs)
+    ax.add_patch(arrow)
+```
+
+## The "Smoking Gun" of Impulsive Heating
+
+```{python}
+Heq = 2e-3
+duration = 200.
+L = 40 * u.Mm
+config = read_xml(os.path.join(EBTEL_DIR, 'config', 'ebtel.example.cfg.xml'))
+config['loop_length'] = L.to_value('cm')
+res_single = multi_event_simulation(config, 1, Heq, duration)
+res_multi = multi_event_simulation(config, 10, Heq, duration)
+
+aspect_ratio = 2
+fig = plt.figure(figsize=(12, 12/aspect_ratio))
+ax1 = plt.subplot2grid((2,2),(0,0))
+ax2 = plt.subplot2grid((2,2),(1,0))
+ax3 = plt.subplot2grid((2,2),(0,1), rowspan=2)
+
+# Plot single nanoflare
+ax1.plot(res_single['time'], res_single['heat'], color=frequency_palette[1], label='impulsive')
+ax2.plot(res_single['time'], res_single['electron_temperature'].to(u.MK), color=frequency_palette[1])
+bins_T, H = calculate_em(
+    res_single['time'], res_single['electron_temperature'], res_single['density'], L)
+plot_histogram(H.value, bins_T.value, ax3, color=frequency_palette[1])
+
+# Plot multiple nanoflares
+ax1.plot(res_multi['time'], res_multi['heat'], color=frequency_palette[0], label='steady-ish')
+ax2.plot(res_multi['time'], res_multi['electron_temperature'].to(u.MK), color=frequency_palette[0])
+bins_T, H = calculate_em(
+    res_multi['time'], res_multi['electron_temperature'], res_multi['density'], L)
+plot_histogram(H.value, bins_T.value, ax3, color=frequency_palette[0])
+
+# Annotate phases
+ax3.annotate(f'Heating',
+            xy=(6e6, 3e27),
+            xytext=(4.5e6, 1e28),
+            textcoords='data',
+            color='k',
+            arrowprops=dict(color='k', arrowstyle='-|>'),
+            horizontalalignment='left',
+            verticalalignment='center',
+            rotation=0,
+            fontsize=12)
+ax3.annotate(f'Radiative cooling',
+            xy=(.9e6, 6e26),
+            xytext=(1.5e6, 5e27),
+            textcoords='data',
+            color='k',
+            arrowprops=dict(color='k', arrowstyle='-|>'),
+            horizontalalignment='right',
+            verticalalignment='center',
+            rotation=0,
+            fontsize=12)
+
+# Labels and limits
+ax1.set_xlim(0,5e3)
+ax1.set_ylim(-0.005,0.105)
+ax1.xaxis.set_major_formatter(matplotlib.ticker.NullFormatter())
+ax1.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=4))
+ax1.set_ylabel(r'$Q$ [erg cm$^{-3}$ s$^{-1}$]')
+ax2.set_xlim(0,5e3)
+ax2.set_ylim(0.3, 11.5)
+ax2.set_xlabel(r'$t$ [s]')
+ax2.set_ylabel(r'$T_e$ [MK]')
+ax3.set_xscale('log')
+ax3.set_yscale('log')
+ax3.set_ylim(5e25, 3e28)
+ax3.set_xlim(3e5, 2e7)
+ax3.set_xlabel(r'$T_e$ [K]')
+ax3.set_ylabel(r'EM [cm$^{-5}$]')
+ax1.legend(frameon=False)
+plt.subplots_adjust(wspace=0.25, hspace=0.05)
+plt.show()
+```
+
+::: aside
+@cargill_implications_1994, @klimchuk_spectroscopic_2001, @cargill_nanoflare_2004
+:::
+
+# Observations are difficult...
+
+## EIS + XRT Not Sufficient
+
+![@winebarger_defining_2012](static/winebarger_2012_blindspot.png)
+
+## Some Observations in the HXRs
+
+:::: {.columns}
+
+::: {.column width="45%"}
+![@ishikawa_detection_2017](static/ishikawa_foxsi_2017_dem.png)
+:::
+
+::: {.column width="55%"}
+![@ishikawa_hot_2019](static/ishikawa_krucker_2019_dem.png)
+:::
+
+::::
+
+::: aside
+Also NuSTAR, e.g. @marsh_hard_2018, talk by J. Duncan on Tuesday
+:::
+
+## Key Diagnostics in the SXR Range
+
+```{python}
+spectral_table = SpectralModel().spectral_table
+
+fig = plt.figure(figsize=(15, 7))
+vmin, vmax = AsymmetricPercentileInterval(1,99).get_limits(spectral_table.data)
+ax = spectral_table.plot(aspect=20,
+                         norm=ImageNormalize(vmin=vmin, vmax=vmax, stretch=LogStretch()),
+                         axes_units=('MK', 'AA'),
+                         cmap='plasma')
+cb = fig.colorbar(ax.get_images()[0], ax=ax, pad=0.01)
+cb.set_label(spectral_table.unit.to_string(format='latex_inline'))
+ax.coords[0].set_axislabel('Wavelength [Å]')
+ax.coords[1].set_axislabel('Temperature [MK]')
+ax.set_xlim(spectral_table.wcs.world_to_pixel([1,60]*u.AA, 1*u.MK)[0])
+ax.set_ylim(spectral_table.wcs.world_to_pixel(1*u.AA, [1,30]*u.MK)[1])
+plt.show()
+```
+
+## Not Many Observations Here...
+
+![](static/wavelength-time-coverage.png)
+
+## ...But Some!
+
+:::: {.columns}
+::: {.column width="45%"}
+![@del_zanna_elemental_2014](static/del_zanna_mason_2014_dem.png)
+:::
+::: {.column width="55%"}
+![@caspi_new_2015](static/caspi_2015_spectrum.png)
+:::
+::::
+
+::: aside
+Also recent results from MaGIXS rocket [@savage_first_2023]
+:::
+
+## The Multi-Order X-ray Spectral Imager (MOXSI) {.smaller}
+
+::: {.notes}
+SQ: What are the origins of hot plasma in solar flares and active regions?
+CubIXSS ~~6U~~ 16U cubesat launching 2025
+:::
+
+:::: {.columns}
+::: {.column width="60%"}
+- Full-disk slitless spectrograph ("overlappograph")
+- Spectral coverage from 1--60 Å (12--0.2 keV)
+- Spatial plate scale: 7.4 arcsec pixel$^{-1}$
+- Spectral plate scale: 72 mÅ pixel$^{-1}$
+- Heritage transmission gratings from *Chandra*
+- Exposure time: 1 s
+- Integration time: 1 h (ARs), 1 minute (flares)
+:::
+::: {.column width="40%"}
+![](static/CubIXSS_badge.png)
+:::
+::::
+
+## MOXSI Data
+
+```{python}
+observed_components = [read_overlappogram(f) for f in sorted((observed_data_dir / 'overlappograms_full_disk').glob('*.fits'))]
+observed_stacked = stack_components(observed_components, wcs_index=5)
+
+width = 14
+data_unit = 'ph/pix/h'
+fig = plt.figure(figsize=(width,0.3*width))
+sl = np.s_[0,:750,:]
+ax = fig.add_subplot(projection=observed_stacked[sl].wcs)
+vmin,vmax = AsymmetricPercentileInterval(1,99.99).get_limits(observed_stacked[sl].to(data_unit).data)
+observed_stacked[sl].plot(
+    data_unit=data_unit,
+    axes=ax,
+    norm=ImageNormalize(vmin=vmin,vmax=vmax,stretch=LogStretch()),cmap='viridis',
+)
+#color_lat_lon_axes(ax)
+add_arrow_from_coords(ax, (1200,-400)*u.arcsec, (1200, 400)*u.arcsec, color='C4', mutation_scale=15,)
+color_lat_lon_axes(ax, lon_color='C1', lat_color='C4')
+for c in ax.coords:
+    c.set_ticks(([-1000,0,1000]*u.arcsec).to('deg'))
+    c.grid(ls='--', alpha=0.75)
+ax.coords[0].set_axislabel('Helioprojective Longitude [arcsec]')
+ax.coords[1].set_axislabel('Helioprojective Latitude [arcsec]')
+
+cb = fig.colorbar(ax.get_images()[0], ax=ax, pad=0.0075, extend='max')
+cb.set_label(u.Unit(data_unit).to_string(format='latex_inline'))
+cb.locator = matplotlib.ticker.MaxNLocator(nbins=5)
+cb.update_ticks()
+
+# Add wavelength annotations
+annot_pt = SkyCoord(Tx=-1000*u.arcsec, Ty=0*u.arcsec, frame=wcs_to_celestial_frame(observed_stacked.wcs))
+line_indices = [1, 3, 10, 12, 16, 18]
+for line in selected_lines[line_indices]:
+    pix_x, pix_y, _ = observed_stacked.wcs.world_to_pixel(annot_pt, line['wavelength'])
+    ax.annotate(f'{line["ion name"]}',
+                xy=(pix_x, pix_y),  # theta, radius
+                xytext=(0, 50),    # fraction, fraction
+                textcoords='offset points',
+                color='w',
+                arrowprops=dict(color='w', shrink=0.05),
+                horizontalalignment='center',
+                verticalalignment='center',
+                rotation=90,
+                fontsize=12)
+for line in selected_lines[line_indices]:
+    pix_x, pix_y, _ = stack_components(observed_components, wcs_index=0).wcs.world_to_pixel(annot_pt, line['wavelength'])
+    ax.annotate(f'{line["ion name"]}',
+                xy=(pix_x, pix_y),  # theta, radius
+                xytext=(0, 50),    # fraction, fraction
+                textcoords='offset points',
+                color='w',
+                arrowprops=dict(color='w', shrink=0.05),
+                horizontalalignment='center',
+                verticalalignment='center',
+                rotation=90,
+                fontsize=12)
+plt.show()
+```
+
+---
+
+```{python}
+width = 14
+fig = plt.figure(figsize=(width, width/2))
+sl = np.s_[0, 330:400, 900:]
+labels = [f'order={i}' for i in range(5)] + ['All orders', ]
+data_unit = 'ph/pix/h'
+for i,ol in enumerate(observed_components[4:]+[observed_stacked,] ):
+    ax = fig.add_subplot(6,1,i+1,projection=ol[sl].wcs)
+    vmin,vmax = AsymmetricPercentileInterval(2,99.99).get_limits(ol[sl].to(data_unit).data)
+    norm = ImageNormalize(vmin=vmin,vmax=vmax,stretch=LogStretch())
+    ol[sl].plot(axes=ax, norm=norm,cmap='viridis',data_unit=data_unit,interpolation='none')
+    ax.text(1080, 65, labels[i],
+            horizontalalignment='right',
+            verticalalignment='top',
+            color='w')
+    for c in ax.coords:
+        c.set_ticks_visible(False)
+        c.set_ticklabel_visible(False)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='1%', pad=0.05, axes_class=matplotlib.axes.Axes)
+    upper_tick = float(f'{vmax:.1f}')
+    cbar = fig.colorbar(ax.get_images()[0], cax=cax, orientation='vertical', ticks=[vmax])
+    cax.yaxis.set_ticks_position("right")
+    cbar.formatter = matplotlib.ticker.StrMethodFormatter("{x:.2f}")
+    cbar.update_ticks()
+
+plt.subplots_adjust(hspace=0.075)
+plt.show()
+```
+
+---
+
+```{python}
+width = 14
+fig = plt.figure(figsize=(width, width*0.4))
+sl = np.s_[0,330:400,900:]
+labels = [f'order={i}' for i in range(5)] + ['All orders', ]
+data_unit = 'ph / pix / h'
+ax = None
+for i,ol in enumerate(observed_components[4:]+[observed_stacked,] ):
+    rebin_total = ol[sl].rebin((ol[sl].data.shape[0], 1), operation=np.sum)[0]
+    if ax is None:
+        ax = fig.add_subplot(projection=rebin_total.wcs)
+    rebin_total.plot(axes=ax,
+                     data_unit=data_unit,
+                     label=labels[i],
+                     color='k' if i==5 else spectral_palette[i])
+    
+# Add line labels
+center_loc = SkyCoord(Ty=-440*u.arcsec, Tx=0*u.arcsec, frame=wcs_to_celestial_frame(observed_components[0].wcs))
+line_indices = [1, 3, 4, 10, 13, 15, 16, 18]
+for ol, color in zip(observed_components[5:7], spectral_palette[1:]):
+    line_pos, _, _ = ol[:,330:400,900:].wcs.world_to_pixel(center_loc, selected_lines[line_indices]['wavelength'])
+    for pos, row in zip(line_pos, selected_lines[line_indices]):
+        bump_up = abs(ol.meta['PC2_3'])%2 == 0
+        bump = 30
+        text_ypos = 360
+        ax.annotate(
+            f'{row["ion name"]}, {row["wavelength"].to_string(format="latex_inline", precision=5)}',
+            (pos, 0),
+            xytext=(0, text_ypos+bump if bump_up else text_ypos),
+            textcoords='offset points',
+            rotation=90,
+            color=color,
+            horizontalalignment='center',
+            verticalalignment='center',
+            arrowprops=dict(color=color, arrowstyle='-', ls='--'),
+        )
+
+ax.set_ylabel('Summed Counts [ph/h]')
+ax.set_xlabel('Helioprojective Latitude [arcsec]')
+ax.set_yscale('symlog')
+ax.set_ylim(0,2e3)
+ax.set_xlim(0,ol[sl].data.shape[1])
+ax.legend(frameon=False)
+plt.show()
+```
+
+## MOXSI Bandpasses
+
+```{python}
+filtergram_channels = [Channel(f'filtergram_{i}') for i in range(1,5)]
+dispersed_channels = [SpectrogramChannel(o) for o in range(0,5)]
+
+fig = plt.figure(figsize=(12,6))
+ax = fig.add_subplot()
+for chan,color in zip(dispersed_channels, spectral_palette):
+    ax.plot(chan.wavelength, chan.effective_area, color=color, label=f'order={chan.spectral_order}')
+for chan,color in zip(filtergram_channels, filtergram_palette):
+    ax.plot(chan.wavelength, chan.effective_area, color=color,
+            label='Al-poly' if 'Al' in chan.filter_label else chan.filter_label)
+
+ax.set_yscale('log')
+ax.set_xlim(1,70)
+ax.set_ylim(1e-11,1e-4)
+ax.set_xlabel('Wavelength [Å]')
+ax.set_ylabel('Effective Area [cm$^2$]')
+wave_to_energy = lambda x: u.Quantity(x, 'AA').to_value('keV', equivalencies=u.equivalencies.spectral())
+energy_to_wave = lambda x: u.Quantity(x, 'keV').to_value('AA', equivalencies=u.equivalencies.spectral())
+secax = ax.secondary_xaxis('top', functions=(wave_to_energy, energy_to_wave))
+secax.set_xlabel('Energy [keV]')
+secax.set_xticks([12, 2, 1, 0.5, 0.3, 0.2])
+ax.legend(frameon=False,ncol=2)
+plt.show()
+```
+
+# Can MOXSI See the 🚬🔫?
+
+## Simulating Active Region Emission
+
+::: {.notes}
+- show field extrapolation  on top of AIA image
+- We use the heating model described by @warren_observation_2020.
+- Summarize heating parameter space (with plots of loop simulations and DEMs)
+- Show a few temperature bins per DEM
+- Show a few spectral lines
+- Show 1D DEM and spectra
+- Then, say "but can we make this distinction with MOXSI?"
+:::
+
+```{python}
+skeleton_hf = synthesizAR.Skeleton.from_asdf(simulation_data_dir / 'p0.3' / 'skeleton.asdf')
+skeleton_lf = synthesizAR.Skeleton.from_asdf(simulation_data_dir / 'p0.005' / 'skeleton.asdf')
+m_aia = sunpy.map.Map(simulation_data_dir / 'aia_171.fits')
+blc_ar = SkyCoord(Tx=-100*u.arcsec, Ty=-525*u.arcsec, frame=m_aia.coordinate_frame)
+trc_ar = SkyCoord(Tx=250*u.arcsec, Ty=-325*u.arcsec, frame=m_aia.coordinate_frame)
+
+fig = plt.figure(figsize=(14, 6))
+gs = GridSpec(2, 2, figure=fig)
+
+# Fieldlines
+ax1 = fig.add_subplot(gs[:,0], projection=m_aia)
+m_aia.plot(axes=ax1)
+for s in skeleton_hf.loops:
+    ax1.plot_coord(s.coordinate, color='C0', alpha=0.25)
+ax1.set_xlim(m_aia.wcs.world_to_pixel(blc_ar)[0]-200, m_aia.wcs.world_to_pixel(trc_ar)[0]+200)
+ax1.set_ylim(m_aia.wcs.world_to_pixel(blc_ar)[1]-200, m_aia.wcs.world_to_pixel(trc_ar)[1]+200)
+
+ax2 = fig.add_subplot(gs[0,1])
+ax3 = fig.add_subplot(gs[1,1])
+alpha = 0.25
+for i, l in enumerate(skeleton_lf.loops[::10]):
+    ax2.plot(l.time, l.electron_temperature.to('MK'), color=frequency_palette[1], alpha=alpha, lw=1)
+    line_lf = ax3.plot(l.time, l.density.to('cm-3')/1e9, color=frequency_palette[1], alpha=alpha, lw=1)
+for i, l in enumerate(skeleton_hf.loops[::10]):
+    ax2.plot(l.time, l.electron_temperature.to('MK'), color=frequency_palette[0], alpha=alpha, lw=1)
+    line_hf = ax3.plot(l.time, l.density.to('cm-3')/1e9, color=frequency_palette[0], alpha=alpha, lw=1)
+
+ax2.set_xlim(skeleton_lf.loops[0].time[[0,-1]].to_value('s'))
+ax3.set_xlim(skeleton_lf.loops[0].time[[0,-1]].to_value('s'))
+ax2.set_ylim(0, 20)
+ax3.set_ylim(0, 29)
+ax3.set_xlabel('$t$ [s]')
+ax2.set_ylabel('$T_e$ [MK]')
+ax3.set_ylabel('$n$ [$10^9$ cm$^{-3}$]')
+ax2.xaxis.set_major_formatter(matplotlib.ticker.NullFormatter())
+ax3.legend([line_lf, line_hf], ['Low frequency', 'High frequency'], frameon=False)
+
+plt.subplots_adjust(hspace=0.0)
+plt.show()
+```
+
+::: {.aside}
+Run EBTEL simulation for each of the $\approx800$ loops traced from PFSS extrapolation
+:::
+
+---
+
+```{python}
+# Load DEM cubes
+temperature_bin_edges = 10**np.arange(5.5, 7.6, 0.1) * u.K
+temperature_bin_centers = 10**((np.log10(temperature_bin_edges.value)[1:]+np.log10(temperature_bin_edges.value)[:-1])/2)*u.K
+dem_cube_hf = InstrumentDEM.dem_maps_list_to_cube(
+    sunpy.map.Map(sorted((simulation_data_dir / 'p0.3' / 'dem').glob('m_*_t1800.fits'))),
+    temperature_bin_centers,
+)
+dem_cube_lf = InstrumentDEM.dem_maps_list_to_cube(
+    sunpy.map.Map(sorted((simulation_data_dir / 'p0.005' / 'dem').glob('m_*_t1800.fits'))),
+    temperature_bin_centers,
+)
+
+# Plot DEM cubes
+norm = ImageNormalize(vmin=1e24, vmax=5e27, stretch=LogStretch())
+fig = plt.figure(figsize=(14,6.8))
+dem_indices = [7, 9, 11, 13, 14]
+for i,idem in enumerate(dem_indices):
+    ax = fig.add_subplot(2,len(dem_indices),i+1, projection=dem_cube_hf[idem].wcs)
+    dem_cube_hf[idem].plot(axes=ax, norm=norm, cmap='inferno')
+    ax.set_title(temperature_bin_centers[idem].to('MK').to_string(format='latex_inline', precision=3))
+    ax.coords[0].set_axislabel(' ')
+    ax.coords[1].set_axislabel(' ')
+    ax.coords[0].set_ticklabel_visible(False)
+    if i > 0:
+        ax.coords[1].set_ticklabel_visible(False)
+    ax.coords[0].set_ticks(color='w')
+    ax.coords[1].set_ticks(color='w')
+    ax = fig.add_subplot(2,len(dem_indices),i+len(dem_indices)+1, projection=dem_cube_lf[idem].wcs)
+    dem_cube_lf[idem].plot(axes=ax, norm=norm, cmap='inferno')
+    if i == 0:
+        ax.coords[0].set_axislabel('HPC Longitude')
+        ax.coords[1].set_axislabel('HPC Latitude')
+    else:
+        ax.coords[0].set_axislabel(' ')
+        ax.coords[1].set_axislabel(' ')
+        ax.coords[1].set_ticklabel_visible(False)
+    ax.coords[0].set_ticks(color='w')
+    ax.coords[1].set_ticks(color='w')
+plt.subplots_adjust(hspace=0.05, wspace=0.05)
+plt.show()
+```
+
+::: {.aside}
+Compute DEM from $n,T_e$ from loop simulations at 1 s cadence for total duration of 1 h
+:::
+
+---
+
+```{python}
+spec_cube_hf = read_data_cube(simulation_data_dir / 'p0.3' / 'spectra' / 'spec_cube_t1000.fits')
+spec_cube_lf = read_data_cube(simulation_data_dir / 'p0.005' / 'spectra' / 'spec_cube_t1000.fits')
+
+line_indices = [0, 9, 2, 3, 10]
+fig = plt.figure(figsize=(14,6.8))
+for i, row in enumerate(selected_lines[line_indices]):
+    iwave = int(np.argmin(np.fabs(row['wavelength'] - spec_cube_hf.axis_world_coords(0)[0])))
+    ax = fig.add_subplot(2,len(line_indices), i+1, projection=spec_cube_hf[iwave].wcs)
+    vmin,vmax = AsymmetricPercentileInterval(2,99.99).get_limits(spec_cube_lf[iwave].data)
+    norm = ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch())
+    spec_cube_hf[iwave].plot(axes=ax, norm=norm, cmap='magma')
+    ax.set_title(f'{row["ion name"]} {row["wavelength"].to("AA").to_string(format="latex_inline", precision=4)}')
+    ax.coords[0].set_axislabel(' ')
+    ax.coords[1].set_axislabel(' ')
+    ax.coords[0].set_ticklabel_visible(False)
+    if i > 0:
+        ax.coords[1].set_ticklabel_visible(False)
+    ax.coords[0].set_ticks(color='w')
+    ax.coords[1].set_ticks(color='w')
+    ax = fig.add_subplot(2,len(line_indices),i+len(line_indices)+1, projection=spec_cube_lf[iwave].wcs)
+    spec_cube_lf[iwave].plot(axes=ax, norm=norm, cmap='magma')
+    if i == 0:
+        ax.coords[0].set_axislabel('HPC Longitude')
+        ax.coords[1].set_axislabel('HPC Latitude')
+    else:
+        ax.coords[0].set_axislabel(' ')
+        ax.coords[1].set_axislabel(' ')
+        ax.coords[1].set_ticklabel_visible(False)
+    ax.coords[0].set_ticks(color='w')
+    ax.coords[1].set_ticks(color='w')
+plt.subplots_adjust(hspace=0.05, wspace=0.05)
+plt.show()
+```
+
+::: {.aside}
+Low-frequency heating produces excess core emission in hot lines 
+:::
+
+## Simulating MOXSI Emission
+
+::: {.notes}
+- Show full images
+- Sum over AR
+    - Focus on Fe XVII (good distinguisher!)
+    - Other hot Fe ions (some help here)
+    - Si lines (and here)
+    - O VII and VIII (less so)
+:::
+
+```{python}
+overlappograms_hf = [read_overlappogram(file) for file in (simulation_data_dir / f'p0.3' / 'overlappograms').glob('overlappogram_o*.fits')]
+overlappograms_lf = [read_overlappogram(file) for file in (simulation_data_dir / f'p0.005' / 'overlappograms').glob('overlappogram_o*.fits')]
+
+sl = np.s_[0, 330:400, 900:]
+norm = ImageNormalize(vmin=0, vmax=50, stretch=LogStretch())
+fig = plt.figure(figsize=(14, 2))
+axes = []
+for i, overlaps in enumerate([overlappograms_hf, overlappograms_lf]):
+    cropped_cube = stack_components(overlaps)[sl]
+    ax = fig.add_subplot(2, 1, i+1, projection=cropped_cube.wcs)
+    cropped_cube.plot(
+        axes=ax,
+        norm=norm,
+        data_unit='photon',
+        cmap='viridis',
+        interpolation='none'
+    )
+    color_lat_lon_axes(ax)
+    ax.coords[1].set_axislabel('HPC Latitude' if i>0 else ' ')
+    ax.coords[0].set_axislabel('HPC Longitude' if i>0 else ' ')
+    axes.append(ax)
+
+cb = fig.colorbar(ax.get_images()[0], extend='max', ax=axes, pad=0.01)
+cb.set_label('photon')
+cb.locator = matplotlib.ticker.MaxNLocator(nbins=3)
+cb.update_ticks()
+
+plt.show()
+```
+
+```{python}
+fig = plt.figure(figsize=(14, 3))
+ax = None
+labels = ['High frequency', 'Low frequency']
+for ol, color, label in zip([overlappograms_hf, overlappograms_lf], frequency_palette, labels):
+    ol_stacked = stack_components(ol)
+    total_rebin = ol_stacked[0].rebin((ol_stacked[0].data.shape[0], 1),operation=np.sum)[0]
+    if ax is None:
+        ax = fig.add_subplot(projection=total_rebin)
+    total_rebin.plot(axes=ax, ls='-', data_unit='ph', label=label, color=color)
+
+ax.set_yscale('symlog')
+ax.set_ylim(0, 215)
+ax.set_xlim(980, 2000)
+ax.set_ylabel('Summed Counts [ph]')
+ax.coords[1].set_axislabel('HPC Latitude')
+ax.legend(frameon=False)
+
+plt.show()
+```
+
+---
+
+```{python}
+fig = plt.figure(figsize=(14, 5.5))
+
+# HF
+hf_stacked = stack_components(overlappograms_hf)
+hf_summed = hf_stacked[0].rebin((hf_stacked[0].data.shape[0], 1),operation=np.sum)[0]
+ax = fig.add_subplot(projection=hf_summed)
+hf_summed.plot(axes=ax, ls='-', data_unit='ph', label='High frequency', color=frequency_palette[0])
+# LF
+lf_stacked = stack_components(overlappograms_lf)
+lf_summed = lf_stacked[0].rebin((lf_stacked[0].data.shape[0], 1),operation=np.sum)[0]
+lf_summed.plot(axes=ax, ls='-', data_unit='ph', label='Low frequency', color=frequency_palette[1])
+
+ar_center = SkyCoord(Tx=50*u.arcsec,
+                     Ty=-505*u.arcsec,
+                     frame=wcs_to_celestial_frame(overlappograms_hf[0].wcs))
+
+fe_lines = selected_lines[selected_lines['element']=='Fe']
+for ol, color in zip(overlappograms_hf[1:3], spectral_palette[1:]):
+    line_pos, _, _ = ol.wcs.world_to_pixel(ar_center, fe_lines['wavelength'])
+    for pos, row in zip(line_pos, fe_lines):
+        text_ypos = 950
+        ax.annotate(
+            f'{row["ion name"]}, {row["wavelength"].to_string(format="latex_inline", precision=5)}',
+            (pos, 0),
+            xytext=(0, text_ypos),
+            textcoords='offset pixels',
+            rotation=90,
+            color=color,
+            horizontalalignment='center',
+            verticalalignment='center',
+            arrowprops=dict(color=color, arrowstyle='-', ls='--'),
+        )
+
+ax.set_ylim(0, 215)
+ax.set_xlim(1050, 1250)
+ax.set_ylabel('Summed Counts [ph]')
+ax.coords[1].set_axislabel('HPC Latitude')
+ax.legend(frameon=False)
+
+plt.show()
+```
+
+---
+
+```{python}
+fig = plt.figure(figsize=(14, 5.5))
+
+# HF
+hf_stacked = stack_components(overlappograms_hf)
+hf_summed = hf_stacked[0].rebin((hf_stacked[0].data.shape[0], 1),operation=np.sum)[0]
+ax = fig.add_subplot(projection=hf_summed)
+hf_summed.plot(axes=ax, ls='-', data_unit='ph', label='High frequency', color=frequency_palette[0])
+# LF
+lf_stacked = stack_components(overlappograms_lf)
+lf_summed = lf_stacked[0].rebin((lf_stacked[0].data.shape[0], 1),operation=np.sum)[0]
+lf_summed.plot(axes=ax, ls='-', data_unit='ph', label='Low frequency', color=frequency_palette[1])
+
+ar_center = SkyCoord(Tx=50*u.arcsec,
+                     Ty=-505*u.arcsec,
+                     frame=wcs_to_celestial_frame(overlappograms_hf[0].wcs))
+
+si_mg_lines = selected_lines[[r in ['Si', 'Mg'] for r in selected_lines['element']]]
+for ol, color in zip(overlappograms_hf[1:], spectral_palette[1:]):
+    line_pos, _, _ = ol.wcs.world_to_pixel(ar_center, si_mg_lines['wavelength'])
+    for pos, row in zip(line_pos, si_mg_lines):
+        text_ypos = 950
+        ax.annotate(
+            f'{row["ion name"]}, {row["wavelength"].to_string(format="latex_inline", precision=5)}',
+            (pos, 0),
+            xytext=(0, text_ypos),
+            textcoords='offset pixels',
+            rotation=90,
+            color=color,
+            horizontalalignment='center',
+            verticalalignment='center',
+            arrowprops=dict(color=color, arrowstyle='-', ls='--'),
+        )
+
+ax.set_ylim(0, 215)
+ax.set_xlim(980, 1500)
+ax.set_ylabel('Summed Counts [ph]')
+ax.coords[1].set_axislabel('HPC Latitude')
+ax.legend(frameon=False)
+
+plt.show()
+```
+
+---
+
+```{python}
+fig = plt.figure(figsize=(14, 5.5))
+
+# HF
+hf_stacked = stack_components(overlappograms_hf)
+hf_summed = hf_stacked[0].rebin((hf_stacked[0].data.shape[0], 1),operation=np.sum)[0]
+ax = fig.add_subplot(projection=hf_summed)
+hf_summed.plot(axes=ax, ls='-', data_unit='ph', label='High frequency', color=frequency_palette[0])
+# LF
+lf_stacked = stack_components(overlappograms_lf)
+lf_summed = lf_stacked[0].rebin((lf_stacked[0].data.shape[0], 1),operation=np.sum)[0]
+lf_summed.plot(axes=ax, ls='-', data_unit='ph', label='Low frequency', color=frequency_palette[1])
+
+ar_center = SkyCoord(Tx=50*u.arcsec,
+                     Ty=-505*u.arcsec,
+                     frame=wcs_to_celestial_frame(overlappograms_hf[0].wcs))
+
+O_lines = selected_lines[[r in ['O'] for r in selected_lines['element']]]
+for ol, color in zip(overlappograms_hf[1:], spectral_palette[1:]):
+    line_pos, _, _ = ol.wcs.world_to_pixel(ar_center, O_lines['wavelength'])
+    for pos, row in zip(line_pos, O_lines):
+        text_ypos = 950
+        ax.annotate(
+            f'{row["ion name"]}, {row["wavelength"].to_string(format="latex_inline", precision=5)}',
+            (pos, 0),
+            xytext=(0, text_ypos),
+            textcoords='offset pixels',
+            rotation=90,
+            color=color,
+            horizontalalignment='center',
+            verticalalignment='center',
+            arrowprops=dict(color=color, arrowstyle='-', ls='--'),
+        )
+
+ax.set_ylim(0, 70)
+ax.set_xlim(1190, 1600)
+ax.set_ylabel('Summed Counts [ph]')
+ax.coords[1].set_axislabel('HPC Latitude')
+ax.legend(frameon=False)
+
+plt.show()
+```
+
+## Summary
+
+## References
+
+::: {#refs}
+:::
