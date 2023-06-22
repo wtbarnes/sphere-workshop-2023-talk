@@ -54,7 +54,6 @@ rule sample_spectral_cube_to_overlappogram:
     input:
         DATA_DIR / 'p{frequency}' / 'spectra'
     output:
-        directory(DATA_DIR / 'p{frequency}' / 'instr_cubes_o{order}.zarr'),
         DATA_DIR / 'p{frequency}' / 'overlappograms' / 'overlappogram_o{order}.fits'
     params:
         spectral_order=lambda wildcards: int(wildcards.order)

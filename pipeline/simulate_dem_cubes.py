@@ -33,7 +33,7 @@ dem_moxsi = InstrumentDEMOXSI(observing_interval,
                               pad_fov=pad_fov)
 
 # Connect to Dask client
-# client = distributed.Client(address=snakemake.config['client_address'])
+client = distributed.Client(address=snakemake.config['client_address'])
 
 # Build DEM maps
 dem_output_dir = pathlib.Path(snakemake.output[0])
@@ -44,12 +44,12 @@ dem_maps = dem_moxsi.observe(skeleton, save_directory=dem_output_dir, save_kerne
 spectra_output_dir = pathlib.Path(snakemake.output[1])
 spectra_output_dir.mkdir(parents=True, exist_ok=True)
 spec_tables = get_spectral_tables()
-spec_table = spec_tables[snakemake.config['spectral_table']][:,:2000]  # cut spectra to wavelengths that fall on detector
-for i,t in enumerate(dem_moxsi.observing_time):
+spec_table = spec_tables[snakemake.config['spectral_table']][:, :2000]  # cut spectra to wavelengths that fall on detector
+for i, t in enumerate(dem_moxsi.observing_time):
     dem_maps = sunpy.map.Map(sorted(list(dem_output_dir.glob(f'*_t{i}.fits'))))
     dem_cube = dem_moxsi.dem_maps_list_to_cube(dem_maps, dem_moxsi.temperature_bin_centers)
     header = dem_maps[0].wcs.to_header()
-    for k,v in dem_maps[0].meta.items():
+    for k, v in dem_maps[0].meta.items():
         if k.upper() not in header.keys() and k != 'keycomments':
             header[k] = v
     spec_cube = dem_moxsi.calculate_intensity(dem_cube, spec_table, header)
