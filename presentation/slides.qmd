@@ -25,8 +25,6 @@ title-slide-attributes:
   data-background-image: "static/sunpy_logo_portrait_powered.png"
   data-background-size: 7%
   data-background-position: 2% 2%
-execute:
-  freeze: auto
 ---
 
 ```{python}
