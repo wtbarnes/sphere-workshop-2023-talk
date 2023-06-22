@@ -1,0 +1,14 @@
+axes.titlesize: 10
+axes.labelsize: 10
+legend.fontsize: 7
+legend.frameon: false
+xtick.labelsize: 8
+ytick.labelsize: 8
+xtick.major.pad: 3
+xtick.minor.pad: 3
+ytick.major.pad: 3
+ytick.minor.pad: 3
+xtick.direction: in
+ytick.direction: in
+savefig.bbox: tight
+lines.linewidth: 2
